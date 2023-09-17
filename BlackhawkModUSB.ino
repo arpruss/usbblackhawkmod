@@ -1,4 +1,4 @@
-#include <USBComposite.h>
+ #include <USBComposite.h>
 #include "debounce.h"
 
 #define NO_VALUE 0xDEADBEEFul
@@ -6,7 +6,13 @@
 #define AXISX PA0
 #define AXISY PA1
 #define AXISTHROTTLE PA2
-const int buttons[] = {PA4,PA5,PA6,PA7,PB3,PB4,PB5};
+const unsigned buttons[] = {PA4,PA5,PA6,PA7,PB3,PB4,PB5};
+const unsigned joyMap[] = {1,2,3,4,5,6,7};
+const unsigned x360Map[] = {XBOX_A,XBOX_B,XBOX_X,XBOX_Y,XBOX_LSHOULDER,XBOX_RSHOULDER,XBOX_START};
+boolean x360 = false;
+USBHID HID;
+HIDJoystick joy(HID);
+USBXBox360W<1> XBox360;
 #define NUM_BUTTONS (sizeof buttons / sizeof *buttons)
 Debounce digital0(buttons[0],0);
 Debounce digital1(buttons[1],0);
@@ -16,11 +22,13 @@ Debounce digital4(buttons[4],0);
 Debounce digital5(buttons[5],0);
 Debounce digital6(buttons[6],0);
 Debounce* digital[] = {&digital0,&digital1,&digital2,&digital3,&digital4,&digital5,&digital6};
+#define LAST_DIGITAL digital6
 
 #define HYSTERESIS 10 // shifts smaller than this are rejected
 #define MAX_HYSTERESIS_REJECTIONS 8 // unless we've reached this many of them, and then we use an average
 #define READ_ITERATIONS 50
 #define AXIS_CONVERT(x) ((x)>>2)
+#define AXIS_CONVERT_X360(x) (((int32)(x)-2048)*32767/2048)
 
 uint16 analogRead2(uint8 pin) {
   return adc_read(pin == AXISX ? &adc1 : &adc2, PIN_MAP[pin].adc_channel);
@@ -84,9 +92,26 @@ class AnalogPort {
 AnalogPort axisX(AXISX);
 AnalogPort axisY(AXISY);
 AnalogPort axisThrottle(AXISTHROTTLE);
+int32 cx,cy;
 
-USBHID HID;
-HIDJoystick joy(HID);
+uint16 axisConvertJoystick(int32 x, int32  cx) {
+  x += 2048 - cx;
+  if (x<0)
+    x = 0;
+  else if (x>=4096)
+    x = 4095;
+  return x * 1023 / 4095;
+}
+
+int16 axisConvertX360(int32 x, int32 cx) {
+  x = (x - cx) * 32767 / 2048;
+  if (x<-32768)
+    return -32768;
+  else if (x>32767)
+    return 32767;
+  else
+    return x;  
+}
 
 void setup() {
   // default is 55_5
@@ -114,15 +139,31 @@ void setup() {
 
 //  pinMode(LED, OUTPUT);
 //  digitalWrite(LED, 1);
-  
-  HID.registerComponent();
-#ifdef SERIAL_DEBUG
-  debug.registerComponent();
-#endif    
-  joy.setManualReportMode(true);
-  USBComposite.begin();
+
+  if (LAST_DIGITAL.getRawState()) {
+    x360 = true;
+    XBox360.begin();
+  }
+  else {
+    x360 = false;
+    HID.registerComponent();
+  #ifdef SERIAL_DEBUG
+    debug.registerComponent();
+  #endif    
+    joy.setManualReportMode(true);
+  }
+  USBComposite.begin();    
+
+  for (uint32 i=0;i<100;i++) {
+    cx += axisX.getValue();
+    cy += axisY.getValue();
+  }
+  cx = (cx+50)/100;
+  cy = (cy+50)/100;    
   
   while (!USBComposite);
+
+  
 }
 
 #ifdef SERIAL_DEBUG
@@ -131,35 +172,25 @@ uint32 count = 0;
 #endif
 
 void loop() {
-  joy.X(AXIS_CONVERT(axisX.getValue()));
-  joy.Y(AXIS_CONVERT(axisY.getValue()));
-  joy.sliderRight(1023-AXIS_CONVERT(axisThrottle.getValue()));
-  
-  for (uint32 i = 0 ; i < NUM_BUTTONS ; i++ ) {
-    joy.button(i+1, digital[i]->getState());
-  }
-  joy.sendReport();
-#ifdef SERIAL_DEBUG
-  count++;
-  if (count == 1000) {
-    uint32 t = millis() - countStart;
-    char out[10];
-    out[9] = 0;
-    char *p = out + 8;
-    while (1) {
-      *p = t % 10 + '0';
-      t /= 10;
-      if (t == 0) {
-        debug.write(p);
-        debug.write("\n");
-        break;
-      }
-      p--;
+  if (x360) {
+    XBox360.controllers[0].X(axisConvertX360(axisX.getValue(),cx));
+    XBox360.controllers[0].Y(-axisConvertX360(axisY.getValue(),cy));
+    XBox360.controllers[0].sliderRight(axisThrottle.getValue()>>4);
+    
+    for (uint32 i = 0 ; i < NUM_BUTTONS ; i++ ) {
+      XBox360.controllers[0].button(x360Map[i], digital[i]->getState());
     }
-    count = 0;
-    countStart = millis();
+    XBox360.controllers[0].send();
   }
-#endif
-
+  else {
+    joy.X(axisConvertJoystick(axisX.getValue(),cx));
+    joy.Y(axisConvertJoystick(axisY.getValue(),cy));
+    joy.sliderRight(1023-axisConvertJoystick(axisThrottle.getValue(),2048));
+    
+    for (uint32 i = 0 ; i < NUM_BUTTONS ; i++ ) {
+      joy.button(joyMap[i], digital[i]->getState());
+    }
+    joy.send();
+  }
 }
 
